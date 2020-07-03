@@ -21,6 +21,10 @@ channel = 'vcan0'
 mt_sending = MerkleTools()
 mt_receiving = MerkleTools()
 
+decryptionPool = {0:[]}
+Pool = []
+decryptionKeys = []
+
 def xor(var, key):
     """
         - ** var ** *bit_string* : First input of the xor operation
@@ -52,7 +56,7 @@ def encryption(current_anchor_random_number, message, can_id_key, can_id_counter
         backend = default_backend()
     )
     kdf_output = kdf.derive(can_id_key)
-    #rint("Encryption derivation key:", kdf_output)
+    #print("Encryption derivation key:", kdf_output)
     hash_digest = sha256(kdf_output).hexdigest().encode()
 
     length = len(message)#+len(can_id_counter)
@@ -165,9 +169,9 @@ def sendData(id, ciphertext, singleFrame):
             mt_sending.make_tree()
             mt_s = mt_sending.get_merkle_root()
             mt_sending.reset_tree()
-            msg = can.Message(arbitration_id=0x2ac, data = bytes(str(mt_s).encode())[:16])
+            msg = can.Message(arbitration_id=0x2ac, data = bytes(str(mt_s).encode())[:8], is_extended_id=False)
             bus.send(msg)
-            print("Merkle tree root hash, sending: %s",mt_s)
+            print("Merkle tree root hash, sending from %s: %s" %(hex(id), mt_s))
         else:
             mt_sending.add_leaf(message.data.hex())
         bus.send(message)
@@ -189,7 +193,8 @@ def periodicData(id, current_anchor_random_number):
 def randomData(id, current_anchor_random_number):
     """
         Generate periodic random data frames through the CAN bus, calls the sending function to send data frames created through the bus.
-        - ** id ** *bytes* : ID key identifying the message in the bus.
+        - ** id ** *bytes* : ID key identifying the message in sendData(0x2ac,bytes(str(mt_r).encode()[:16]),True)
+the bus.
         - ** current_anchor_random_number ** *bit_string* : current anchor random number that was being broadcasted through the bus
     """
     while(True):
@@ -203,10 +208,10 @@ def randomData(id, current_anchor_random_number):
             can_id_key = b'thisisjustakeythisisjustakeeyID1'
 
             length_data = random.randint(0,8)
+            while(length_data == 0):
+                length_data = random.randint(0,8)
             random_data = get_random_bytes(length_data)
-            #print("Unencrypted message from broadcast ECU: %s", random_data.hex())
             ciphertext = encryption(current_anchor_random_number, random_data, can_id_key, can_id_counter)
-            #print("Encrypted message from broadcast ECU: %s", ciphertext.hex())
             sendData(id, ciphertext,False)
             time.sleep(1)
 
@@ -219,34 +224,64 @@ def merkleMonitor(id):
     mt = MerkleTools()
     for message in bus:
         #If the broadcast number is detected, calculate all the root hashes.
+        mt_r = 0
         if(hex(message.arbitration_id) == "0x3ab"):
-            mt.make_tree()
-            mt_r = mt.get_merkle_root()
-            mt.reset_tree()
-            print("Merkle tree root hash, receiving from %s: %s" %(hex(id), mt_r))
+            mt_receiving.make_tree()
+            mt_r = mt_receiving.get_merkle_root()
+            mt_receiving.reset_tree()
+            decryptionPool[mt_r] = Pool.copy()
+            Pool.clear()
+            #print("Merkle tree root hash, receiving from %s: %s" %(hex(id), mt_r))
         elif(hex(message.arbitration_id) == hex(id)):
-            mt.add_leaf(message.data.hex())
-        
-        
-            
+            mt_receiving.add_leaf(message.data.hex())
+            #print("Adding message %s with root hash %s" %(message.data.hex(),str(mt_r)))
+            Pool.append(message.data.hex())
+            decryptionPool[mt_r] = Pool
+        elif(hex(message.arbitration_id) == "0x3ac"):
+            decryptionKeys.append(message.data.decode())
 
+def messageValidation(current_anchor_random_number):
+    while(True):
+        print("-----------------------------------------------")
+        #print("Printing decryption keys: ",decryptionKeys)
+        print("Printing decryption pool:", decryptionPool)
+        #print("Printing pool:", Pool)
+        print("-----------------------------------------------")
+        #temp = {}
+        decryptedMessages = []
+        for key in decryptionKeys:
+            for pool_keys in decryptionPool.keys():
+                if(key in str(pool_keys) and len(decryptionPool[pool_keys]) == 10):
+                    for messages in decryptionPool[pool_keys]:
+                        decryptedMessages.append(decryption(current_anchor_random_number,bytearray.fromhex(messages), b'thisisjustakeythisisjustakeeyID1',0))
+        
+        for message in decryptedMessages:
+            print(type(message))
+            print("This is the message decrypted", message)
+        
+        #print("I'm temporal values",temp)  
+
+        time.sleep(10)
+
+        print(decryptedMessages)
 try:
         current_anchor_random_number = get_random_bytes(8)
         current_anchor_random_number = b'\xfd\xf2\xcdQO\x1b\xa6\x06'
         IDa = 0x2aa
         IDb = 0x2ab
-
         IDc = 0x3aa
 
         thread_1 = threading.Thread(target=randomData, args=(IDa, current_anchor_random_number,))
         #thread_2 = threading.Thread(target=periodicBroadcast, args=(IDb, current_anchor_random_number,))
         #thread_3 = threading.Thread(target=receiveData, args=(IDa, current_anchor_random_number,))
         thread_4 = threading.Thread(target=merkleMonitor, args=(IDc,))
+        thread_5 = threading.Thread(target=messageValidation, args=(current_anchor_random_number,))
 
         thread_1.start()
         #thread_2.start()
         #thread_3.start()
         thread_4.start()
+        thread_5.start()
 
 except:  
     print("Error: Unable to start thread.")
